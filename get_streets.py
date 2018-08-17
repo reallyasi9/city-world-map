@@ -1,80 +1,55 @@
 #!/usr/bin/env python3
 
-import osmapi
-from yaml import load, dump
+import overpy
+from yaml import dump
 try:
-    from yaml import CLoader as Loader, CDumper as Dumper
+    from yaml import CDumper as Dumper
 except ImportError:
-    from yaml import Loader, Dumper
+    from yaml import Dumper
+import click
 
-api = osmapi.OsmApi()
 
-detroit = api.RelationGet(134591)
+def clean_way_tags(tags):
+    if 'lanes' in tags:
+        tags['lanes'] = int(tags['lanes'])
 
-max_lat = -180
-min_lat = 180
-max_lon = -360
-min_lon = 360
+    if 'oneway' in tags:
+        tags['oneway'] = tags['oneway'] == 'yes'
 
-for member in detroit['member']:
-    if member['type'] != 'way' or member['role'] != 'outer':
-        continue
-    way = api.WayGet(member['ref'])
-    if not way['visible']:
-        continue
-    nodes = api.NodesGet(way['nd'])
-    for _, node in nodes.items():
-        if node['lat'] < min_lat:
-            min_lat = node['lat']
-        if node['lon'] < min_lon:
-            min_lon = node['lon']
-        if node['lat'] > max_lat:
-            max_lat = node['lat']
-        if node['lon'] > max_lon:
-            max_lon = node['lon']
+    return tags
 
-streets = {}
 
-# Can't download too many nodes at once, so slice this up
-low_lon = min_lon
-high_lon = min_lon + 0.01
-while high_lon <= max_lon:
-    low_lat = min_lat
-    high_lat = min_lat + 0.01
-    while high_lat <= max_lat:
-        # print(low_lon, low_lat, high_lon, high_lat)
-        maplet = api.Map(low_lon, low_lat, high_lon, high_lat)
+@click.command()
+@click.argument('city')
+@click.argument('outfile', type=click.File('w'))
+@click.option('--limit', type=click.IntRange(min=1), default=None,
+              help="Limit the query to the first number of results "
+                   "(default: no limit)")
+def download_city_ways(city, outfile, limit):
+    api = overpy.Overpass()
+    q = 'area["name"~"{:s}"];way["highway"](area);out;'.format(city)
+    results = api.query(q)
 
-        for node in maplet:
-            if node['type'] != 'way':
-                continue
-            # print(node)
-            data = node['data']
-            node_id = data['id']
-            tags = data['tag']
-            if 'highway' not in tags:
-                continue
-            if 'name' not in tags or 'lanes' not in tags:
-                #name = '(service drive)'
-                continue
-            else:
-                name = tags['name']
-                lanes = tags['lanes']
-            nodes = data['nd']
+    ways = {}
+    for i, way in enumerate(results.ways):
+        w = clean_way_tags(way.tags)
+        lats = []
+        lons = []
+        node_ids = []
+        nodes = way.get_nodes(resolve_missing=True)
+        for node in nodes:
+            node_ids.append(node.id)
+            lats.append(float(node.lat))
+            lons.append(float(node.lon))
 
-            if node_id in streets:
-                streets[node_id]['nodes'] += nodes
-            else:
-                streets[node_id] = {
-                    'nodes': nodes,
-                    'lanes': lanes,
-                    'name': name
-                }
+        w['nodes'] = {'ids': node_ids, 'lats': lats, 'lons': lons}
+        ways[way.id] = w
 
-        low_lat = high_lat
-        high_lat += 0.01
+        if limit and i >= limit:
+            break
 
-    low_lon = high_lon
-    high_lon += 0.01
+    dump(ways, outfile, Dumper=Dumper)
 
-print(dump(streets, Dumper=Dumper))
+
+if __name__ == '__main__':
+    download_city_ways()
